@@ -40,6 +40,8 @@ ATR_PERIOD = getenv_int("ATR_PERIOD", 14)
 ATR_STOP_MULT = getenv_float("ATR_STOP_MULT", 1.5)
 RR_MULT = getenv_float("RR_MULT", 2.0)
 ALERT_MODE = getenv_str("ALERT_MODE", "changes")
+TREND_DAYS = getenv_int("TREND_DAYS", 15)
+TARGET_ATR_MULT = getenv_float("TARGET_ATR_MULT", 2.5)
 
 
 def send_telegram(message: str) -> None:
@@ -108,9 +110,44 @@ def load_data() -> pd.DataFrame:
     return df.dropna().copy()
 
 
+def analyze_recent_trend(df: pd.DataFrame) -> dict:
+    bars = min(len(df), TREND_DAYS * 24 if INTERVAL == '1h' else TREND_DAYS)
+    recent = df.tail(bars).copy()
+    first_close = float(recent["Close"].iloc[0])
+    last_close = float(recent["Close"].iloc[-1])
+    change_pct = ((last_close / first_close) - 1) * 100 if first_close else 0.0
+    recent_high = float(recent["High"].max())
+    recent_low = float(recent["Low"].min())
+    last_atr = float(df["atr"].iloc[-1])
+    last_rsi = float(df["rsi"].iloc[-1])
+    last_ema_fast = float(df["ema_fast"].iloc[-1])
+    last_ema_slow = float(df["ema_slow"].iloc[-1])
+    last_ema_trend = float(df["ema_trend"].iloc[-1])
+
+    if last_close > last_ema_trend and last_ema_fast > last_ema_slow and change_pct > 1.0:
+        trend = "ALCISTA"
+        expected_target = max(recent_high, last_close + TARGET_ATR_MULT * last_atr)
+    elif last_close < last_ema_trend and last_ema_fast < last_ema_slow and change_pct < -1.0:
+        trend = "BAJISTA"
+        expected_target = min(recent_low, last_close - TARGET_ATR_MULT * last_atr)
+    else:
+        trend = "LATERAL"
+        expected_target = recent_high if last_rsi >= 50 else recent_low
+
+    return {
+        "trend": trend,
+        "days": TREND_DAYS,
+        "change_pct": round(change_pct, 2),
+        "recent_high": round(recent_high, 2),
+        "recent_low": round(recent_low, 2),
+        "expected_target": round(expected_target, 2),
+    }
+
+
 def generate_signal(df: pd.DataFrame) -> dict:
     last = df.iloc[-1]
     prev = df.iloc[-2]
+    trend_info = analyze_recent_trend(df)
 
     cross_up = prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
     cross_down = prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
@@ -133,14 +170,14 @@ def generate_signal(df: pd.DataFrame) -> dict:
         direction = "LONG"
         reason = "Cruce alcista EMA rápida/lenta con tendencia y RSI a favor"
         stop_loss = entry_price - ATR_STOP_MULT * atr
-        take_profit = entry_price + RR_MULT * (entry_price - stop_loss)
+        take_profit = max(entry_price + RR_MULT * (entry_price - stop_loss), trend_info["expected_target"])
         exit_price = take_profit
     elif cross_down and trend_down and rsi_bear:
         action = "ENTRADA"
         direction = "SHORT"
         reason = "Cruce bajista EMA rápida/lenta con tendencia y RSI a favor"
         stop_loss = entry_price + ATR_STOP_MULT * atr
-        take_profit = entry_price - RR_MULT * (stop_loss - entry_price)
+        take_profit = min(entry_price - RR_MULT * (stop_loss - entry_price), trend_info["expected_target"])
         exit_price = take_profit
     elif last["Close"] < last["ema_fast"] and last["rsi"] < 50 and trend_up:
         action = "SALIDA"
@@ -174,10 +211,12 @@ def generate_signal(df: pd.DataFrame) -> dict:
         "stop_loss": round(stop_loss, 2) if stop_loss is not None else None,
         "take_profit": round(take_profit, 2) if take_profit is not None else None,
         "time": signal_time.strftime("%d/%m/%Y %H:%M"),
+        "trend_info": trend_info,
     }
 
 
 def format_message(signal: dict) -> str:
+    trend = signal["trend_info"]
     lines = [
         "🛢️ <b>Bot Señales WTI</b>",
         "",
@@ -186,6 +225,12 @@ def format_message(signal: dict) -> str:
         f"🔄 Dirección: <b>{signal['direction']}</b>",
         f"💵 Precio actual WTI: {signal['entry_price']}$",
         f"📅 Vela: {signal['time']}",
+        "",
+        f"📆 Tendencia últimos {trend['days']} días: <b>{trend['trend']}</b>",
+        f"📊 Cambio {trend['days']} días: {trend['change_pct']}%",
+        f"⬆️ Máximo reciente: {trend['recent_high']}$",
+        f"⬇️ Mínimo reciente: {trend['recent_low']}$",
+        f"🎯 Precio esperado/objetivo: {trend['expected_target']}$",
         "",
         f"⚡ EMA rápida: {signal['ema_fast']}",
         f"📊 EMA lenta: {signal['ema_slow']}",
