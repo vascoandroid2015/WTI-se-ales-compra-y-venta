@@ -1,24 +1,45 @@
 import os
-from datetime import datetime, timezone
 
 import pandas as pd
 import requests
 import yfinance as yf
 
-TOKEN = os.getenv("TELEGRAM_TOKEN", "")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-SYMBOL = os.getenv("WTI_SYMBOL", "CL=F")
-INTERVAL = os.getenv("WTI_INTERVAL", "1h")
-PERIOD = os.getenv("WTI_PERIOD", "60d")
-FAST_EMA = int(os.getenv("FAST_EMA", "21"))
-SLOW_EMA = int(os.getenv("SLOW_EMA", "50"))
-TREND_EMA = int(os.getenv("TREND_EMA", "200"))
-RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
-ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
-ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", "1.5"))
-RR_MULT = float(os.getenv("RR_MULT", "2.0"))
-ALERT_MODE = os.getenv("ALERT_MODE", "changes")
+def getenv_str(name: str, default: str) -> str:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip()
+
+
+def getenv_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
+
+
+def getenv_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
+TOKEN = getenv_str("TELEGRAM_TOKEN", "")
+CHAT_ID = getenv_str("TELEGRAM_CHAT_ID", "")
+
+SYMBOL = getenv_str("WTI_SYMBOL", "CL=F")
+INTERVAL = getenv_str("WTI_INTERVAL", "1h")
+PERIOD = getenv_str("WTI_PERIOD", "60d")
+FAST_EMA = getenv_int("FAST_EMA", 21)
+SLOW_EMA = getenv_int("SLOW_EMA", 50)
+TREND_EMA = getenv_int("TREND_EMA", 200)
+RSI_PERIOD = getenv_int("RSI_PERIOD", 14)
+ATR_PERIOD = getenv_int("ATR_PERIOD", 14)
+ATR_STOP_MULT = getenv_float("ATR_STOP_MULT", 1.5)
+RR_MULT = getenv_float("RR_MULT", 2.0)
+ALERT_MODE = getenv_str("ALERT_MODE", "changes")
 
 
 def send_telegram(message: str) -> None:
