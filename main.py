@@ -1,217 +1,192 @@
 import os
-import re
-import time
-from datetime import datetime, timedelta
-from urllib.parse import quote_plus
+from datetime import datetime, timezone
 
+import pandas as pd
 import requests
-from playwright.sync_api import sync_playwright
+import yfinance as yf
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "@Vuelos_Peninsula_Canarias_Penins")
+TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-PRECIO_MAXIMO = int(os.getenv("PRECIO_MAXIMO", "95"))
-DIAS_A_BUSCAR = int(os.getenv("DIAS_A_BUSCAR", "35"))
-TOP_RESULTADOS = int(os.getenv("TOP_RESULTADOS", "5"))
-MAX_ESCALA_MINUTOS = int(os.getenv("MAX_ESCALA_MINUTOS", "1440"))
-
-ISLAS = ["fue", "ace"]
-PENINSULA = ["bio", "vit", "eas", "ovd"]
-
-CIUDADES = {
-    "fue": "Fuerteventura",
-    "ace": "Lanzarote",
-    "bio": "Bilbao",
-    "vit": "Vitoria",
-    "eas": "San Sebastián",
-    "ovd": "Asturias",
-}
+SYMBOL = os.getenv("WTI_SYMBOL", "CL=F")
+INTERVAL = os.getenv("WTI_INTERVAL", "1h")
+PERIOD = os.getenv("WTI_PERIOD", "60d")
+FAST_EMA = int(os.getenv("FAST_EMA", "21"))
+SLOW_EMA = int(os.getenv("SLOW_EMA", "50"))
+TREND_EMA = int(os.getenv("TREND_EMA", "200"))
+RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
+ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))
+ATR_STOP_MULT = float(os.getenv("ATR_STOP_MULT", "1.5"))
+RR_MULT = float(os.getenv("RR_MULT", "2.0"))
+ALERT_MODE = os.getenv("ALERT_MODE", "changes")
 
 
-def google_flights_url(origen: str, destino: str, fecha: str) -> str:
-    q = quote_plus(
-        f"one way flights from {origen} to {destino} on {fecha} with max layover {MAX_ESCALA_MINUTOS} minutes"
-    )
-    return f"https://www.google.com/travel/flights?q={q}"
-
-
-FUENTES = {
-    "google": google_flights_url,
-    "skyscanner": lambda origen, destino, fecha: (
-        f"https://www.skyscanner.es/transport/flights/{origen}/{destino}/{fecha}/"
-        f"?adults=1&adultsv2=1&cabinclass=economy&rtn=0&max_stops=1&max_stopover_minutes={MAX_ESCALA_MINUTOS}"
-    ),
-    "momondo": lambda origen, destino, fecha: (
-        f"https://www.momondo.es/flight-search/{origen}-{destino}/{fecha}?sort=price_a&fs=stops=-0,1;maxlayover={MAX_ESCALA_MINUTOS}"
-    ),
-    "kayak": lambda origen, destino, fecha: (
-        f"https://www.kayak.es/flights/{origen}-{destino}/{fecha}?sort=price_a&fs=stops=-0,1;maxlayover={MAX_ESCALA_MINUTOS}"
-    ),
-}
-
-SELECTORES_PRECIO = [
-    '[data-testid*="price"]',
-    '[class*="price"]',
-    '[class*="Price"]',
-    'span[jsname="V67aGc"]',
-]
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/134.0.0.0 Safari/537.36"
-)
-
-
-def enviar(msg: str) -> None:
-    if not TOKEN:
-        print("⚠️ TELEGRAM_TOKEN no configurado; se muestra por consola.")
+def send_telegram(message: str) -> None:
+    if not TOKEN or not CHAT_ID:
+        print("TELEGRAM_TOKEN o TELEGRAM_CHAT_ID no configurados. Mensaje por consola:\n")
+        print(message)
         return
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     response = requests.post(
         url,
-        data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"},
+        data={
+            "chat_id": CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
         timeout=30,
     )
-
     if not response.ok:
-        print(f"⚠️ Error enviando a Telegram: {response.status_code} {response.text[:200]}")
+        raise RuntimeError(f"Telegram error {response.status_code}: {response.text[:300]}")
 
 
-def limpiar_precio(texto: str):
-    if not texto:
-        return None
-
-    texto = texto.replace("\xa0", " ").strip()
-    coincidencias = re.findall(r"\d{1,4}(?:[.,]\d{1,2})?", texto)
-    if not coincidencias:
-        return None
-
-    for bruto in coincidencias:
-        valor = bruto.replace(".", "").replace(",", ".")
-        try:
-            precio = float(valor)
-        except ValueError:
-            continue
-        if 10 <= precio <= 2000:
-            return precio
-    return None
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = losses.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    return 100 - (100 / (1 + rs))
 
 
-def extraer_precios(page):
-    precios = []
-    vistos = set()
-
-    for selector in SELECTORES_PRECIO:
-        try:
-            textos = page.locator(selector).all_text_contents()
-        except Exception:
-            continue
-        for texto in textos[:20]:
-            precio = limpiar_precio(texto)
-            if precio and precio not in vistos:
-                vistos.add(precio)
-                precios.append(precio)
-    return precios
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    prev_close = df["Close"].shift(1)
+    tr = pd.concat(
+        [
+            (df["High"] - df["Low"]).abs(),
+            (df["High"] - prev_close).abs(),
+            (df["Low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
 
-def visitar_fuente(page, nombre: str, origen: str, destino: str, fecha: str):
-    url_builder = FUENTES[nombre]
-    url = url_builder(origen, destino, fecha)
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(3500)
-        precios = extraer_precios(page)
-        print(f"{nombre:<11} {origen}->{destino} {fecha}: {precios[:5]}")
-        return precios
-    except Exception as e:
-        print(f"❌ {nombre} error {origen}-{destino} {fecha}: {e}")
-        return []
+def load_data() -> pd.DataFrame:
+    df = yf.download(SYMBOL, period=PERIOD, interval=INTERVAL, auto_adjust=False, progress=False)
+    if df is None or df.empty:
+        raise RuntimeError("No se pudieron descargar datos de WTI")
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    needed = ["Open", "High", "Low", "Close"]
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"Faltan columnas en datos: {missing}")
+
+    df = df.dropna(subset=needed).copy()
+    df["ema_fast"] = df["Close"].ewm(span=FAST_EMA, adjust=False).mean()
+    df["ema_slow"] = df["Close"].ewm(span=SLOW_EMA, adjust=False).mean()
+    df["ema_trend"] = df["Close"].ewm(span=TREND_EMA, adjust=False).mean()
+    df["rsi"] = compute_rsi(df["Close"], RSI_PERIOD)
+    df["atr"] = compute_atr(df, ATR_PERIOD)
+    return df.dropna().copy()
 
 
-def buscar_vuelos():
-    resultados = []
+def generate_signal(df: pd.DataFrame) -> dict:
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent=USER_AGENT,
-            locale="es-ES",
-            timezone_id="Europe/Madrid",
-        )
-        page = context.new_page()
+    cross_up = prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
+    cross_down = prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
+    trend_up = last["Close"] > last["ema_trend"] and last["ema_fast"] > last["ema_trend"]
+    trend_down = last["Close"] < last["ema_trend"] and last["ema_fast"] < last["ema_trend"]
+    rsi_bull = last["rsi"] >= 52
+    rsi_bear = last["rsi"] <= 48
 
-        print(
-            f"🔍 Buscando vuelos < {PRECIO_MAXIMO}€ para {DIAS_A_BUSCAR} días "
-            f"con escala máxima de {MAX_ESCALA_MINUTOS} minutos"
-        )
-        rutas = [(o, d) for o in ISLAS for d in PENINSULA] + [(o, d) for o in PENINSULA for d in ISLAS]
+    action = "SIN_SEÑAL"
+    reason = "Mercado sin confirmación clara"
+    entry = float(last["Close"])
+    atr = float(last["atr"])
+    stop_loss = None
+    take_profit = None
 
-        for offset in range(1, DIAS_A_BUSCAR + 1):
-            fecha = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
-            print(f"\n📅 {fecha}")
-            for origen, destino in rutas:
-                encontrados = []
-                for fuente in FUENTES:
-                    encontrados.extend(visitar_fuente(page, fuente, origen, destino, fecha))
-                    time.sleep(1.2)
+    if cross_up and trend_up and rsi_bull:
+        action = "ENTRADA_LONG"
+        reason = "Cruce alcista EMA rápida/lenta con tendencia y RSI a favor"
+        stop_loss = entry - ATR_STOP_MULT * atr
+        take_profit = entry + RR_MULT * (entry - stop_loss)
+    elif cross_down and trend_down and rsi_bear:
+        action = "ENTRADA_SHORT"
+        reason = "Cruce bajista EMA rápida/lenta con tendencia y RSI a favor"
+        stop_loss = entry + ATR_STOP_MULT * atr
+        take_profit = entry - RR_MULT * (stop_loss - entry)
+    elif last["Close"] < last["ema_fast"] and last["rsi"] < 50 and trend_up:
+        action = "SALIDA_LONG"
+        reason = "Pérdida de EMA rápida y debilitamiento de momentum"
+    elif last["Close"] > last["ema_fast"] and last["rsi"] > 50 and trend_down:
+        action = "SALIDA_SHORT"
+        reason = "Recuperación sobre EMA rápida y debilitamiento bajista"
 
-                for precio in sorted(set(encontrados)):
-                    if precio < PRECIO_MAXIMO:
-                        resultados.append(
-                            {
-                                "precio": precio,
-                                "origen": origen,
-                                "destino": destino,
-                                "fecha": fecha,
-                            }
-                        )
+    signal_time = pd.Timestamp(last.name)
+    if signal_time.tzinfo is None:
+        signal_time = signal_time.tz_localize("UTC")
+    signal_time = signal_time.tz_convert("Europe/Madrid")
 
-        context.close()
-        browser.close()
-
-    unicos = {
-        (r["precio"], r["origen"], r["destino"], r["fecha"]): r
-        for r in resultados
+    return {
+        "symbol": SYMBOL,
+        "interval": INTERVAL,
+        "action": action,
+        "reason": reason,
+        "price": round(entry, 2),
+        "ema_fast": round(float(last["ema_fast"]), 2),
+        "ema_slow": round(float(last["ema_slow"]), 2),
+        "ema_trend": round(float(last["ema_trend"]), 2),
+        "rsi": round(float(last["rsi"]), 2),
+        "atr": round(atr, 2),
+        "stop_loss": round(stop_loss, 2) if stop_loss is not None else None,
+        "take_profit": round(take_profit, 2) if take_profit is not None else None,
+        "time": signal_time.strftime("%d/%m/%Y %H:%M"),
     }
-    ordenados = sorted(unicos.values(), key=lambda r: (r["precio"], r["fecha"]))
-    return ordenados[:TOP_RESULTADOS]
 
 
-def formatear(resultado: dict) -> str:
-    fecha_txt = datetime.strptime(resultado["fecha"], "%Y-%m-%d").strftime("%d/%m/%Y")
-    return (
-        "✈️ VUELO BARATO DETECTADO\n\n"
-        f"🛫 Origen: {CIUDADES[resultado['origen']]}\n"
-        f"🛬 Destino: {CIUDADES[resultado['destino']]}\n"
-        f"📅 Fecha: {fecha_txt}\n\n"
-        f"💰 Precio: {resultado['precio']:.0f}€\n"
-        f"⏱️ Escala máxima configurada: {MAX_ESCALA_MINUTOS} min\n\n"
-        "🔗 Buscar ahora: https://www.google.com/travel/flights"
-    )
+def format_message(signal: dict) -> str:
+    lines = [
+        "🛢️ <b>Bot Señales WTI</b>",
+        "",
+        f"⏱️ Marco: {signal['interval']}",
+        f"📍 Señal: <b>{signal['action']}</b>",
+        f"💵 Precio WTI: {signal['price']}$",
+        f"📅 Vela: {signal['time']}",
+        "",
+        f"⚡ EMA rápida: {signal['ema_fast']}",
+        f"📊 EMA lenta: {signal['ema_slow']}",
+        f"🧭 EMA tendencia: {signal['ema_trend']}",
+        f"📈 RSI: {signal['rsi']}",
+        f"📏 ATR: {signal['atr']}",
+    ]
+
+    if signal["stop_loss"] is not None:
+        lines.append(f"🛑 Stop loss: {signal['stop_loss']}$")
+    if signal["take_profit"] is not None:
+        lines.append(f"🎯 Take profit: {signal['take_profit']}$")
+
+    lines.extend([
+        "",
+        f"📝 Motivo: {signal['reason']}",
+    ])
+    return "\n".join(lines)
 
 
-def main():
-    vuelos = buscar_vuelos()
-    if vuelos:
-        print(f"✅ Encontrados {len(vuelos)} vuelos baratos")
-        for vuelo in vuelos:
-            mensaje = formatear(vuelo)
-            print(mensaje)
-            print("-" * 60)
-            enviar(mensaje)
+def should_send(signal: dict) -> bool:
+    if ALERT_MODE == "all":
+        return True
+    return signal["action"] != "SIN_SEÑAL"
+
+
+def main() -> None:
+    df = load_data()
+    signal = generate_signal(df)
+    message = format_message(signal)
+    print(message)
+    if should_send(signal):
+        send_telegram(message)
     else:
-        mensaje = (
-            f"❌ No se encontraron vuelos por debajo de {PRECIO_MAXIMO}€ "
-            f"en los próximos {DIAS_A_BUSCAR} días con escala máxima de {MAX_ESCALA_MINUTOS} minutos."
-        )
-        print(mensaje)
-        enviar(mensaje)
+        print("Sin envío a Telegram porque ALERT_MODE=changes y no hay señal operativa.")
 
 
 if __name__ == "__main__":
