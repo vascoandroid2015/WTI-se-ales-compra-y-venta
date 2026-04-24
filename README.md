@@ -6,13 +6,9 @@ Bot en Python para generar señales de entrada y salida sobre petróleo WTI y en
 
 - Descarga datos de WTI usando `yfinance` con el ticker `CL=F`
 - Calcula EMA rápida, EMA lenta, EMA de tendencia, RSI y ATR
-- Genera señales:
-  - `ENTRADA_LONG`
-  - `ENTRADA_SHORT`
-  - `SALIDA_LONG`
-  - `SALIDA_SHORT`
-  - `SIN_SEÑAL`
-- Envía aviso a Telegram cuando hay cambio operativo
+- Indica si la señal es LONG o SHORT
+- Muestra precio de entrada/compra y precio de salida/venta
+- Calcula stop loss y precio objetivo
 - Tolera variables vacías en GitHub Actions y usa valores por defecto
 
 ## Secrets necesarios
@@ -34,14 +30,10 @@ Bot en Python para generar señales de entrada y salida sobre petróleo WTI y en
 - `RR_MULT` → `2.0`
 - `ALERT_MODE` → `changes` o `all`
 
-## Subida a GitHub
+## Señales
 
-1. Crea un repositorio nuevo
-2. Sube estos archivos
-3. Añade los secrets de Telegram
-4. Activa GitHub Actions
-5. Lanza el workflow manualmente
-
-## Nota
-
-Si en GitHub tienes variables definidas pero vacías, este bot ya no se caerá: cogerá automáticamente los valores por defecto.
+- `ENTRADA LONG`: precio de compra/entrada y objetivo de salida
+- `ENTRADA SHORT`: precio de entrada short y objetivo de salida
+- `SALIDA LONG`: precio de venta/salida
+- `SALIDA SHORT`: precio de cierre/salida
+- `SIN_SEÑAL`: sin operación

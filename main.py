@@ -120,28 +120,38 @@ def generate_signal(df: pd.DataFrame) -> dict:
     rsi_bear = last["rsi"] <= 48
 
     action = "SIN_SEÑAL"
+    direction = "NEUTRAL"
     reason = "Mercado sin confirmación clara"
-    entry = float(last["Close"])
+    entry_price = float(last["Close"])
     atr = float(last["atr"])
     stop_loss = None
     take_profit = None
+    exit_price = None
 
     if cross_up and trend_up and rsi_bull:
-        action = "ENTRADA_LONG"
+        action = "ENTRADA"
+        direction = "LONG"
         reason = "Cruce alcista EMA rápida/lenta con tendencia y RSI a favor"
-        stop_loss = entry - ATR_STOP_MULT * atr
-        take_profit = entry + RR_MULT * (entry - stop_loss)
+        stop_loss = entry_price - ATR_STOP_MULT * atr
+        take_profit = entry_price + RR_MULT * (entry_price - stop_loss)
+        exit_price = take_profit
     elif cross_down and trend_down and rsi_bear:
-        action = "ENTRADA_SHORT"
+        action = "ENTRADA"
+        direction = "SHORT"
         reason = "Cruce bajista EMA rápida/lenta con tendencia y RSI a favor"
-        stop_loss = entry + ATR_STOP_MULT * atr
-        take_profit = entry - RR_MULT * (stop_loss - entry)
+        stop_loss = entry_price + ATR_STOP_MULT * atr
+        take_profit = entry_price - RR_MULT * (stop_loss - entry_price)
+        exit_price = take_profit
     elif last["Close"] < last["ema_fast"] and last["rsi"] < 50 and trend_up:
-        action = "SALIDA_LONG"
-        reason = "Pérdida de EMA rápida y debilitamiento de momentum"
+        action = "SALIDA"
+        direction = "LONG"
+        reason = "Pérdida de EMA rápida y debilitamiento de momentum alcista"
+        exit_price = entry_price
     elif last["Close"] > last["ema_fast"] and last["rsi"] > 50 and trend_down:
-        action = "SALIDA_SHORT"
+        action = "SALIDA"
+        direction = "SHORT"
         reason = "Recuperación sobre EMA rápida y debilitamiento bajista"
+        exit_price = entry_price
 
     signal_time = pd.Timestamp(last.name)
     if signal_time.tzinfo is None:
@@ -152,8 +162,10 @@ def generate_signal(df: pd.DataFrame) -> dict:
         "symbol": SYMBOL,
         "interval": INTERVAL,
         "action": action,
+        "direction": direction,
         "reason": reason,
-        "price": round(entry, 2),
+        "entry_price": round(entry_price, 2),
+        "exit_price": round(exit_price, 2) if exit_price is not None else None,
         "ema_fast": round(float(last["ema_fast"]), 2),
         "ema_slow": round(float(last["ema_slow"]), 2),
         "ema_trend": round(float(last["ema_trend"]), 2),
@@ -170,8 +182,9 @@ def format_message(signal: dict) -> str:
         "🛢️ <b>Bot Señales WTI</b>",
         "",
         f"⏱️ Marco: {signal['interval']}",
-        f"📍 Señal: <b>{signal['action']}</b>",
-        f"💵 Precio WTI: {signal['price']}$",
+        f"📍 Tipo: <b>{signal['action']}</b>",
+        f"🔄 Dirección: <b>{signal['direction']}</b>",
+        f"💵 Precio actual WTI: {signal['entry_price']}$",
         f"📅 Vela: {signal['time']}",
         "",
         f"⚡ EMA rápida: {signal['ema_fast']}",
@@ -181,10 +194,14 @@ def format_message(signal: dict) -> str:
         f"📏 ATR: {signal['atr']}",
     ]
 
+    if signal["action"] == "ENTRADA":
+        lines.append(f"🟢 Precio de compra/entrada: {signal['entry_price']}$")
+    if signal["action"] == "SALIDA" and signal["exit_price"] is not None:
+        lines.append(f"🔴 Precio de venta/salida: {signal['exit_price']}$")
+    if signal["take_profit"] is not None:
+        lines.append(f"🎯 Precio objetivo de venta/salida: {signal['take_profit']}$")
     if signal["stop_loss"] is not None:
         lines.append(f"🛑 Stop loss: {signal['stop_loss']}$")
-    if signal["take_profit"] is not None:
-        lines.append(f"🎯 Take profit: {signal['take_profit']}$")
 
     lines.extend([
         "",
