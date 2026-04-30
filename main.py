@@ -61,6 +61,7 @@ def send_telegram(message: str) -> None:
         },
         timeout=30,
     )
+
     if not response.ok:
         raise RuntimeError(f"Telegram error {response.status_code}: {response.text[:300]}")
 
@@ -107,12 +108,18 @@ def load_data() -> pd.DataFrame:
     df["ema_trend"] = df["Close"].ewm(span=TREND_EMA, adjust=False).mean()
     df["rsi"] = compute_rsi(df["Close"], RSI_PERIOD)
     df["atr"] = compute_atr(df, ATR_PERIOD)
-    return df.dropna().copy()
+    df = df.dropna().copy()
+
+    if len(df) < 3:
+        raise RuntimeError("No hay suficientes velas para generar señal")
+
+    return df
 
 
 def analyze_recent_trend(df: pd.DataFrame) -> dict:
-    bars = min(len(df), TREND_DAYS * 24 if INTERVAL == '1h' else TREND_DAYS)
+    bars = min(len(df), TREND_DAYS * 24 if INTERVAL == "1h" else TREND_DAYS)
     recent = df.tail(bars).copy()
+
     first_close = float(recent["Close"].iloc[0])
     last_close = float(recent["Close"].iloc[-1])
     change_pct = ((last_close / first_close) - 1) * 100 if first_close else 0.0
@@ -153,8 +160,8 @@ def generate_signal(df: pd.DataFrame) -> dict:
     cross_down = prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
     trend_up = last["Close"] > last["ema_trend"] and last["ema_fast"] > last["ema_trend"]
     trend_down = last["Close"] < last["ema_trend"] and last["ema_fast"] < last["ema_trend"]
-    rsi_bull = last["rsi"] >= 52
-    rsi_bear = last["rsi"] <= 48
+    rsi_bull = float(last["rsi"]) >= 52
+    rsi_bear = float(last["rsi"]) <= 48
 
     action = "SIN_SEÑAL"
     direction = "NEUTRAL"
@@ -179,12 +186,12 @@ def generate_signal(df: pd.DataFrame) -> dict:
         stop_loss = entry_price + ATR_STOP_MULT * atr
         take_profit = min(entry_price - RR_MULT * (stop_loss - entry_price), trend_info["expected_target"])
         exit_price = take_profit
-    elif last["Close"] < last["ema_fast"] and last["rsi"] < 50 and trend_up:
+    elif float(last["Close"]) < float(last["ema_fast"]) and float(last["rsi"]) < 50 and trend_up:
         action = "SALIDA"
         direction = "LONG"
         reason = "Pérdida de EMA rápida y debilitamiento de momentum alcista"
         exit_price = entry_price
-    elif last["Close"] > last["ema_fast"] and last["rsi"] > 50 and trend_down:
+    elif float(last["Close"]) > float(last["ema_fast"]) and float(last["rsi"]) > 50 and trend_down:
         action = "SALIDA"
         direction = "SHORT"
         reason = "Recuperación sobre EMA rápida y debilitamiento bajista"
@@ -218,7 +225,7 @@ def generate_signal(df: pd.DataFrame) -> dict:
 def format_message(signal: dict) -> str:
     trend = signal["trend_info"]
     lines = [
-        "🛢️ <b>Bot Señales WTI</b>",
+        "<b>🛢️ Bot Señales WTI</b>",
         "",
         f"⏱️ Marco: {signal['interval']}",
         f"📍 Tipo: <b>{signal['action']}</b>",
