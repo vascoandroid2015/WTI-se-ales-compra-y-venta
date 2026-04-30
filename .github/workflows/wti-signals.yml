@@ -38,5 +38,5 @@ jobs:
           ATR_PERIOD: ${{ secrets.ATR_PERIOD }}
           ATR_STOP_MULT: ${{ secrets.ATR_STOP_MULT }}
           RR_MULT: ${{ secrets.RR_MULT }}
-        ALERT_MODE: ${{ vars.ALERT_MODE }}
+          ALERT_MODE: ${{ vars.ALERT_MODE }}
         run: python main.py
